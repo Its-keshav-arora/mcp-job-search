@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MCP Job Search</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      background: #fafafa;
+    }
+    h2, h3 {
+      color: #222;
+    }
+    form {
+      margin-bottom: 20px;
+    }
+    input[type="file"] {
+      margin-right: 10px;
+    }
+    button {
+      padding: 6px 12px;
+      background: #007bff;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 15px;
+      border-radius: 5px;
+      white-space: pre-wrap;   /* ✅ preserve line breaks and wrap long lines */
+      word-wrap: break-word;   /* ✅ prevent overflow */
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h2>Upload Your CV</h2>
+  <form id="uploadForm" enctype="multipart/form-data">
+    <input type="file" name="file" required />
+    <button type="submit">Upload</button>
+  </form>
+
+  <h3>Extracted Information</h3>
+  <pre id="result">No data yet...</pre>
+
+  <script>
+    const form = document.getElementById("uploadForm");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(form);
+
+      const res = await fetch("/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const json = await res.json();
+
+      // ✅ If server returns plain extracted text, show it directly
+      if (json.extracted_text) {
+        document.getElementById("result").textContent = json.extracted_text;
+      } else {
+        document.getElementById("result").textContent = JSON.stringify(json, null, 2);
+      }
+    });
+  </script>
+</body>
+</html>
