@@ -2,56 +2,24 @@ import asyncio
 import sys
 from typing import Optional
 from contextlib import AsyncExitStack
+import json
 import os
+import requests
 
 from flask import Flask, request, jsonify, render_template
-from werkzeug.utils import secure_filename
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import anthropic
 from dotenv import load_dotenv
-
-# For CV text extraction
-import fitz  # PyMuPDF
-import docx
 
 # Load environment variables
 load_dotenv()
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY")
 
 app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-
-# -------- Helpers for extracting text --------
-def extract_text_from_pdf(file_path: str) -> str:
-    text = ""
-    with fitz.open(file_path) as pdf:
-        for page in pdf:
-            text += page.get_text()
-    return text
-
-
-def extract_text_from_docx(file_path: str) -> str:
-    d = docx.Document(file_path)
-    return "\n".join([para.text for para in d.paragraphs])
-
-
-def get_cv_text(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".pdf":
-        return extract_text_from_pdf(file_path)
-    elif ext == ".docx":
-        return extract_text_from_docx(file_path)
-    elif ext in [".txt", ".md"]:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    else:
-        return ""
-
 
 # -------- MCP Web Client --------
 class MCPWebClient:
@@ -66,11 +34,7 @@ class MCPWebClient:
             raise ValueError("Server script must be a .py or .js file")
 
         command = "python" if is_python else "node"
-        server_params = StdioServerParameters(
-            command=command,
-            args=[server_script_path],
-            env=None,
-        )
+        server_params = StdioServerParameters(command=command, args=[server_script_path], env=None)
 
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
         self.stdio, self.write = stdio_transport
@@ -80,44 +44,14 @@ class MCPWebClient:
         response = await self.session.list_tools()
         print("✅ Connected to server with tools:", [t.name for t in response.tools])
 
-    async def process_cv(self, file_path: str) -> dict:
-        """Extract text from CV, send to MCP server/Claude, return JSON profile + full text."""
-        cv_text = get_cv_text(file_path)
-
-        # print FULL extracted text (no truncation)
-        print("\n===== Extracted CV Text (FULL) =====\n")
-        print(cv_text)
-        print("\n====================================\n")
-
-        if not cv_text.strip():
-            return {"error": "Unable to extract text from CV. Please upload a valid PDF, DOCX, or TXT."}
-
-        # Call server tool: extract_profile
-        profile_result = await self.session.call_tool("extract_profile", {"cv_text": cv_text})
-        if not profile_result or not profile_result.content:
-            return {"error": "Failed to extract profile from CV"}
-
-        # Tool result may be a text chunk; parse as JSON
-        first_chunk = profile_result.content[0]
-        profile_text = first_chunk.text if hasattr(first_chunk, "text") else str(first_chunk)
-
-        import json
-        try:
-            profile = json.loads(profile_text)
-        except Exception:
-            return {"error": "Claude did not return valid JSON", "raw": profile_text}
-
-        # return FULL text + structured profile
-        return {
-            "extracted_text": cv_text,
-            "profile": profile
-        }
-
     async def cleanup(self):
         await self.exit_stack.aclose()
 
 
 mcp_client = MCPWebClient()
+
+# Initialize Anthropic client
+client = anthropic.Anthropic()
 
 
 # -------- Flask Routes --------
@@ -135,15 +69,108 @@ def upload_file():
     if file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-    file.save(file_path)
+    # Upload file to Claude API
+    uploaded_file = client.beta.files.upload(
+        file=(file.filename, file.stream, file.mimetype or "application/octet-stream")
+    )
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(mcp_client.process_cv(file_path))
+    file_id = uploaded_file.id
 
-    return jsonify(result)
+    # Extraction prompt
+    extraction_prompt = """
+    Extract ONLY the following fields from this CV:
+
+    {
+      "skills": [...],      // list of strings
+      "location": "...",    // string
+      "experience": "...",  // string (summary of job experience)
+      "jobRole": "..."      // probable job title this candidate is best suited for , based on his experience and the skill.
+    }
+
+    Rules:
+    - If any field is missing, set its value to "N/A".
+    - You will decide the Job role based on the candidate experience and the skills and you will return the best single job suited for the candidate.
+    - Return ONLY valid JSON, nothing else.
+    """
+
+    response = client.beta.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": extraction_prompt},
+                    {"type": "document", "source": {"type": "file", "file_id": file_id}},
+                ],
+            }
+        ],
+        betas=["files-api-2025-04-14"],
+    )
+
+    # Extract Claude raw JSON string
+    extracted_text = response.content[0].text if response.content else ""
+
+    # Remove ```json ... ``` wrappers
+    cleaned_text = (
+        extracted_text.replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    try:
+        parsed = json.loads(cleaned_text)
+    except Exception:
+        parsed = {"skills": ["N/A"], "location": "N/A", "experience": "N/A", "jobRole": "N/A"}
+
+    # Extract fields safely
+    print("output jobs : ", parsed)
+    skills = parsed.get("skills", ["N/A"])
+    if not isinstance(skills, list):
+        skills = [skills] if skills else ["N/A"]
+
+    location = parsed.get("location", "N/A")
+    experience = parsed.get("experience", "N/A")
+    jobRole = parsed.get("jobRole", "N/A")
+
+    # ✅ Job Search API request
+    params = {
+        "api_key": SCRAPINGDOG_API_KEY,
+        "query": jobRole if jobRole != "N/A" else "Software Engineer",
+        "country": location if location != "N/A" else "us",
+    }
+    
+    print("passing params : ", params)
+
+    jobs_data = []
+    try:
+        r = requests.get("https://api.scrapingdog.com/google_jobs", params=params)
+        if r.status_code == 200:
+            job_json = r.json()
+            # Extract first few jobs only
+            for job in job_json.get("jobs_results", [])[:5]:
+                jobs_data.append({
+                    "title": job.get("title", "N/A"),
+                    "company": job.get("company_name", "N/A"),
+                    "location": job.get("location", "N/A"),
+                    "link": job.get("share_link", "#"),
+                    "description": job.get("description", "N/A")[:300] + "..."
+                })
+        else:
+            print(f"Job API request failed: {r.status_code}")
+    except Exception as e:
+        print("Job API error:", str(e))
+        
+    print("Jobs I got : ", jobs_data)
+
+    # ✅ Return extracted + job results
+    return jsonify({
+        "skills": skills,
+        "location": location,
+        "experience": experience,
+        "jobRole": jobRole,
+        "jobs": jobs_data
+    })
 
 
 async def main():

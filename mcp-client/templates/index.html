@@ -4,40 +4,17 @@
   <meta charset="UTF-8">
   <title>MCP Job Search</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      background: #fafafa;
-    }
-    h2, h3 {
-      color: #222;
-    }
-    form {
-      margin-bottom: 20px;
-    }
-    input[type="file"] {
-      margin-right: 10px;
-    }
-    button {
-      padding: 6px 12px;
-      background: #007bff;
-      color: #fff;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    button:hover {
-      background: #0056b3;
-    }
-    pre {
-      background: #f4f4f4;
-      padding: 15px;
-      border-radius: 5px;
-      white-space: pre-wrap;   /* ✅ preserve line breaks and wrap long lines */
-      word-wrap: break-word;   /* ✅ prevent overflow */
-      max-height: 70vh;
-      overflow-y: auto;
-    }
+    body { font-family: Arial, sans-serif; margin: 40px; background: #fafafa; }
+    h2, h3 { color: #222; }
+    form { margin-bottom: 20px; }
+    input[type="file"] { margin-right: 10px; }
+    button { padding: 6px 12px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    pre { background: #f4f4f4; padding: 15px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; max-height: 50vh; overflow-y: auto; }
+    .job { border: 1px solid #ddd; padding: 12px; margin: 10px 0; border-radius: 5px; background: #fff; }
+    .job h4 { margin: 0; color: #007bff; }
+    .job p { margin: 4px 0; }
+    .job a { color: #007bff; text-decoration: none; }
   </style>
 </head>
 <body>
@@ -50,24 +27,45 @@
   <h3>Extracted Information</h3>
   <pre id="result">No data yet...</pre>
 
+  <h3>Recommended Jobs</h3>
+  <div id="jobs">No jobs yet...</div>
+
   <script>
     const form = document.getElementById("uploadForm");
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const formData = new FormData(form);
 
-      const res = await fetch("/upload", {
-        method: "POST",
-        body: formData,
-      });
-
+      const res = await fetch("/upload", { method: "POST", body: formData });
       const json = await res.json();
+      // console.log(json);
 
-      // ✅ If server returns plain extracted text, show it directly
-      if (json.extracted_text) {
-        document.getElementById("result").textContent = json.extracted_text;
+      // Show extracted info
+      document.getElementById("result").textContent = JSON.stringify({
+        skills: json.skills,
+        location: json.location,
+        experience: json.experience,
+        jobRole: json.jobRole
+      }, null, 2);
+
+      // Show job results
+      const jobsDiv = document.getElementById("jobs");
+      jobsDiv.innerHTML = "";
+      if (json.jobs && json.jobs.length > 0) {
+        json.jobs.forEach(job => {
+          const div = document.createElement("div");
+          div.classList.add("job");
+          div.innerHTML = `
+            <h4>${job.title}</h4>
+            <p><strong>Company:</strong> ${job.company}</p>
+            <p><strong>Location:</strong> ${job.location}</p>
+            <p>${job.description}</p>
+            <a href="${job.link}" target="_blank">View Job</a>
+          `;
+          jobsDiv.appendChild(div);
+        });
       } else {
-        document.getElementById("result").textContent = JSON.stringify(json, null, 2);
+        jobsDiv.textContent = "No jobs found.";
       }
     });
   </script>
